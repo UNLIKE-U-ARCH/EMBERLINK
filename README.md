@@ -219,3 +219,12 @@ EmberLink is a practical, rural-focused fire safety and dispatch project based o
 ## Notes
 
 This README reflects the current architecture and project state as documented in the memory bank. The project has passed the available pre-hardware validation gate, but real ESP32 hardware validation remains the essential proof step before calling the system fully ready for deployment.
+
+/**
+ * @file emberlink_types.h
+ * @brief Core data structures, packet formats, and constants for EmberLink.
+ * 
+ * @author Sourish Raj Gubbala
+ * @date 2026
+ * @project EmberLink - SFIC 2026 (Track E: Suraksha)
+ */
