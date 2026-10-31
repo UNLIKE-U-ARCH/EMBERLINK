@@ -1,0 +1,9 @@
+{
+  "C_Cpp.default.includePath": [
+    "${workspaceFolder}",
+    "${workspaceFolder}/stubs",
+    "${workspaceFolder}/shared",
+    "${workspaceFolder}/subnode",
+    "${workspaceFolder}/gateway"
+  ]
+}

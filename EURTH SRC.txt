@@ -1,0 +1,827 @@
+#include <ESP8266WiFi.h>
+#include <ESPAsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <ESP8266HTTPClient.h>
+#include <LittleFS.h>
+#include <ArduinoJson.h>
+#include <DNSServer.h>
+#include <Ticker.h>
+#include "settings.h"
+#include "wifimanager.h"
+#include "admin_ui.h"
+//#include <WiFiClientSecureBearSSL.h>
+#include <time.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <math.h>
+// #include "logo.h"
+
+#define SMOKE_SENSOR_PIN A0
+#define BUZZER_PIN D5
+#define COMM_LED_PIN D7 // Changed from D2 to D7 to resolve conflict with DS18B20 default (D2/GPIO4)
+#define CALIBRATION 1024
+#define TEMP_CALIB 3
+// Smoke detection thresholds
+#define DELTA_THRESHOLD 50 // ADC units - smoke detected when baseline drops by this amount
+int delta=0;
+
+// ==========================================
+// DEEP SLEEP CONFIG
+// ==========================================
+// NOTE: For ESP.deepSleep() to actually wake the chip back up, GPIO16 (D0)
+// must be wired directly to RST on your board. Without that jumper the
+// device will sleep and never wake on its own.
+#define DEEP_SLEEP_SECONDS 60ULL // how long to sleep between normal (non-report, non-alarm) cycles
+#define ALARM_CLEAR_WIFI_TIMEOUT_MS 8000UL // max time to wait for STA reconnect after alarm clears
+
+const char rootCACertificate [] PROGMEM = R"CERT(
+-----BEGIN CERTIFICATE-----
+MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
+TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh
+cmNoIEdyb3VwMRUwEwYDVQQDEwxJU1JHIFJvb3QgWDEwHhcNMTUwNjA0MTEwNDM4
+WhcNMzUwNjA0MTEwNDM4WjBPMQswCQYDVQQGEwJVUzEpMCcGA1UEChMgSW50ZXJu
+ZXQgU2VjdXJpdHkgUmVzZWFyY2ggR3JvdXAxFTATBgNVBAMTDElTUkcgUm9vdCBY
+MTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBAK3oJHP0FDfzm54rVygc
+h77ct984kIxuPOZXoHj3dcKi/vVqbvYATyjb3miGbESTtrFj/RQSa78f0uoxmyF+
+0TM8ukj13Xnfs7j/EvEhmkvBioZxaUpmZmyPfjxwv60pIgbz5MDmgK7iS4+3mX6U
+A5/TR5d8mUgjU+g4rk8Kb4Mu0UlXjIB0ttov0DiNewNwIRt18jA8+o+u3dpjq+sW
+T8KOEUt+zwvo/7V3LvSye0rgTBIlDHCNAymg4VMk7BPZ7hm/ELNKjD+Jo2FR3qyH
+B5T0Y3HsLuJvW5iB4YlcNHlsdu87kGJ55tukmi8mxdAQ4Q7e2RCOFvu396j3x+UC
+B5iPNgiV5+I3lg02dZ77DnKxHZu8A/lJBdiB3QW0KtZB6awBdpUKD9jf1b0SHzUv
+KBds0pjBqAlkd25HN7rOrFleaJ1/ctaJxQZBKT5ZPt0m9STJEadao0xAH0ahmbWn
+OlFuhjuefXKnEgV4We0+UXgVCwOPjdAvBbI+e0ocS3MFEvzG6uBQE3xDk3SzynTn
+jh8BCNAw1FtxNrQHusEwMFxIt4I7mKZ9YIqioymCzLq9gwQbooMDQaHWBfEbwrbw
+qHyGO0aoSCqI3Haadr8faqU9GY/rOPNk3sgrDQoo//fb4hVC1CLQJ13hef4Y53CI
+rU7m2Ys6xt0nUW7/vGT1M0NPAgMBAAGjQjBAMA4GA1UdDwEB/wQEAwIBBjAPBgNV
+HRMBAf8EBTADAQH/MB0GA1UdDgQWBBR5tFnme7bl5AFzgAiIyBpY9umbbjANBgkq
+hkiG9w0BAQsFAAOCAgEAVR9YqbyyqFDQDLHYGmkgJykIrGF1XIpu+ILlaS/V9lZL
+ubhzEFnTIZd+50xx+7LSYK05qAvqFyFWhfFQDlnrzuBZ6brJFe+GnY+EgPbk6ZGQ
+3BebYhtF8GaV0nxvwuo77x/Py9auJ/GpsMiu/X1+mvoiBOv/2X/qkSsisRcOj/KK
+NFtY2PwByVS5uCbMiogziUwthDyC3+6WVwW6LLv3xLfHTjuCvjHIInNzktHCgKQ5
+ORAzI4JMPJ+GslWYHb4phowim57iaztXOoJwTdwJx4nLCgdNbOhdjsnvzqvHu7Ur
+TkXWStAmzOVyyghqpZXjFaH3pO3JLF+l+/+sKAIuvtd7u+Nxe5AW0wdeRlN8NwdC
+jNPElpzVmbUq4JUagEiuTDkHzsxHpFKVK7q4+63SM1N95R1NbdWhscdCb+ZAJzVc
+oyi3B43njTOQ5yOf+1CceWxG1bQVs5ZufpsMljq4Ui0/1lvh+wjChP4kqKOJ2qxq
+4RgqsahDYVvTH9w7jXbyLeiNdd8XM2w9U/t7y0Ff/9yi0GE44Za4rF2LN9d11TPA
+mRGunUHBcnWEvgJBQl9nJEiU0Zsnvgc/ubhPgXRR4Xq37Z0j4r7g1SgEEzwxA57d
+emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
+-----END CERTIFICATE-----
+)CERT";
+ 
+X509List cert(rootCACertificate);
+
+// Configuration file path
+const char* CONFIG_FILE = "/config.json";
+
+// Global settings object
+Settings settings;
+
+// Async WebServer and DNS Server
+AsyncWebServer server(80);
+DNSServer dnsServer;
+
+// Flag to indicate that a data submission is due
+volatile bool dataSendDue = false;
+
+// Magic number to detect cold boot vs deep sleep wake
+#define RTC_MAGIC 0x5AA55AA6
+struct SensorReading {
+  int smoke;
+  float temperature;
+};
+
+struct RTCData {
+  uint32_t magic;
+  uint32_t wakeCount;
+  SensorReading readings[15];
+  int baselineSmoke;
+};
+RTCData rtcData;
+
+// DS18B20 OneWire and temperature objects (initialized in setup if configured)
+OneWire* oneWire = nullptr;
+DallasTemperature* dsSensor = nullptr;
+
+// Last measured values (used for UI and logging)
+float lastTemperature = NAN; // degrees Celsius
+int lastSmokeValue = 0;
+bool lastAlarmTriggered = false; // Stores the true alarm condition based on level logic
+
+// Helper: returns true if temperature is a valid reading (not NAN, not -127 disconnect code)
+bool isValidTemperature(float t) {
+    return !isnan(t) && t != DEVICE_DISCONNECTED_C && t > -100.0f;
+}
+
+// Variables for COMM_LED blinking
+unsigned long lastCommLedBlink = 0;
+bool commLedState = false;
+
+// Variables for keeping awake for UI access
+bool keepAwakeForUI = false;
+unsigned long awakeStartTime = 0;
+
+// Flags for non-blocking restart and boot
+bool pendingRestart = false;
+unsigned long restartTime = 0;
+unsigned long bootTime = 0;
+bool isInitialBoot = false;
+
+// Tracks alarm state across minute-by-minute checks so loop() can detect
+// the exact moment smoke clears (true -> false transition) and react to it
+// by attempting one report and then sleeping immediately, win or lose.
+bool wasAlarmActive = false;
+
+// Helper: persist RTC state and go to deep sleep. This never returns —
+// the chip resets and re-runs setup() when it wakes back up.
+void goToDeepSleep(uint64_t seconds) {
+    Serial.printf("Saving RTC state and entering deep sleep for %llu seconds...\n", seconds);
+    ESP.rtcUserMemoryWrite(0, (uint32_t*)&rtcData, sizeof(rtcData));
+    Serial.flush();
+    WiFi.mode(WIFI_OFF);
+    delay(50);
+    ESP.deepSleep(seconds * 1000000ULL); // deepSleep takes microseconds
+    delay(100); // give the RF/CPU time to actually power down
+}
+
+
+// Final, Truly Robust Template Processor
+String processTemplate(const char* bodyTemplate) {
+    String page = ADMIN_UI_HTML;
+    String body = bodyTemplate;
+    String delta_web = String(lastSmokeValue);
+
+    // Process all placeholders in the body sequentially (avoiding infinite loops)
+    body.replace("%%DEVICE_NAME%%", settings.deviceName);
+    body.replace("%%IP_ADDRESS%%", WiFi.localIP().toString());
+   //body.replace("%%SMOKE_LEVEL%%", String(analogRead(SMOKE_SENSOR_PIN)));
+    body.replace("%%SMOKE_LEVEL%%", String(delta_web));
+    // Temperature (may be N/A if DS18B20 is not present)
+    String tempStr = isnan(lastTemperature) ? "N/A" : String(lastTemperature, 2);
+    String alarmStr = lastAlarmTriggered ? "ALARM" : "OK";
+    body.replace("%%TEMPERATURE%%", tempStr);
+    body.replace("%%ALARM_STATUS%%", alarmStr);
+    body.replace("%%FREQ_1_SELECTED%%", settings.dataPostFrequency == 1 ? "selected" : "");
+    body.replace("%%FREQ_5_SELECTED%%", settings.dataPostFrequency == 5 ? "selected" : "");
+    body.replace("%%FREQ_10_SELECTED%%", settings.dataPostFrequency == 10 ? "selected" : "");
+    body.replace("%%FREQ_15_SELECTED%%", settings.dataPostFrequency == 15 ? "selected" : "");
+    body.replace("%%SMOKE_THRESHOLD%%", String(settings.smokeThreshold));
+    body.replace("%%TEMP_THRESHOLD%%", String(settings.tempThreshold));
+    body.replace("%%DS18B20_PIN%%", String(settings.ds18b20Pin));
+    body.replace("%%ALARM_LEVEL_1_SELECTED%%", settings.alarmLevel == 1 ? "selected" : "");
+    body.replace("%%ALARM_LEVEL_2_SELECTED%%", settings.alarmLevel == 2 ? "selected" : "");
+    body.replace("%%ALARM_LEVEL_3_SELECTED%%", settings.alarmLevel == 3 ? "selected" : "");
+    body.replace("%%BUZZER_DURATION%%", String(settings.buzzerDuration));
+    body.replace("%%SERVER_URL1%%", settings.serverURL1);
+    body.replace("%%AUTH_TOKEN1%%", String(settings.authToken1));
+    body.replace("%%SERVER_URL2%%", settings.serverURL2);
+    body.replace("%%AUTH_TOKEN2%%", String(settings.authToken2));
+    body.replace("%%DEVICE_UUID%%", String(settings.uuid));
+
+    // Now process all placeholders in the main page template sequentially
+    page.replace("%%DEVICE_NAME%%", settings.deviceName);
+    page.replace("%%BODY%%", body);
+    
+    return page;
+}
+
+bool sendSmokeData() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi not connected. Skipping data transmission.");
+    return false;
+  }
+
+  digitalWrite(COMM_LED_PIN, HIGH);
+  bool success = false;
+
+  // Use normal WiFiClient (HTTP)
+  WiFiClient client;
+  HTTPClient http;
+
+  DynamicJsonDocument doc(4096);  
+  JsonArray arr = doc.to<JsonArray>();
+
+  time_t now;
+  time(&now);
+
+  char timeStr[30];
+  strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S UTC", gmtime(&now));
+
+  // 1. DeviceName info (send once per batch)
+  {
+    JsonObject obj = arr.createNestedObject();
+    obj["bn"] = String(settings.deviceName) + "_" + String(settings.uuid) + "_";
+    obj["n"]  = "DeviceName";
+    obj["u"]  = "name";
+    obj["vs"] = "_SMOKESENSOR";
+    obj["timestamp"] = timeStr;
+  }
+
+  // 2. Buffered smoke and temperature readings
+  uint32_t count = (rtcData.wakeCount > 15) ? 15 : rtcData.wakeCount;
+  for (uint32_t i = 0; i < count; i++) {
+    time_t readingTime = now - ((count - 1 - i) * 60);
+    char readingTimeStr[30];
+    strftime(readingTimeStr, sizeof(readingTimeStr), "%Y-%m-%d %H:%M:%S UTC", gmtime(&readingTime));
+    
+    // Smoke
+    JsonObject objS = arr.createNestedObject();
+    objS["bn"] = String(settings.deviceName) + "_" + String(settings.uuid) + "_";
+    objS["n"]  = "smoke";
+    objS["u"]  = "ppm";
+    objS["v"]  = rtcData.readings[i].smoke;
+    objS["timestamp"] = readingTimeStr;
+
+    // Temperature
+    JsonObject objT = arr.createNestedObject();
+    objT["bn"] = String(settings.deviceName) + "_" + String(settings.uuid) + "_";
+    objT["n"]  = "temperature";
+    objT["u"]  = "C";
+    if (isValidTemperature(rtcData.readings[i].temperature)) {
+      objT["v"] = rtcData.readings[i].temperature;
+    } else {
+      // Safe fallback: skip invalid temperature in JSON to prevent Exception 29
+      objT["v"] = nullptr;
+    }
+    objT["timestamp"] = readingTimeStr;
+  }
+
+  String payload;
+  serializeJson(doc, payload);
+
+  Serial.println(F("[HTTP] Sending JSON payload (omitted for speed)"));
+
+  // -------- SEND TO SERVER 1 --------
+  http.begin(client, settings.serverURL1);
+  http.addHeader("Authorization", settings.authToken1);
+  http.addHeader("Content-Type", "application/json");
+
+  int httpResponseCode = http.POST(payload);
+
+  if (httpResponseCode > 0) {
+    Serial.printf("[HTTP] POST 1 response code: %d\n", httpResponseCode);
+    Serial.println(http.getString());
+    if (httpResponseCode == 200 || httpResponseCode == 201) success = true;
+  } else {
+    Serial.printf("[HTTP] POST 1 failed: %s\n", http.errorToString(httpResponseCode).c_str());
+  }
+
+  http.end();
+
+  delay(1000);
+
+  // -------- SEND TO SERVER 2 --------
+  success = true;
+  http.begin(client, settings.serverURL2);
+  http.addHeader("Authorization", settings.authToken2);
+  http.addHeader("Content-Type", "application/json");
+
+  httpResponseCode = http.POST(payload);
+
+  if (httpResponseCode > 0) {
+    Serial.printf("[HTTP] POST 2 response code: %d\n", httpResponseCode);
+    Serial.println(http.getString());
+    if (httpResponseCode == 200 || httpResponseCode == 201) success = true;
+  } else {
+    success = true;
+    Serial.printf("[HTTP] POST 2 failed: %s\n", http.errorToString(httpResponseCode).c_str());
+  }
+
+  http.end();
+
+  digitalWrite(COMM_LED_PIN, LOW);
+  return success;
+}
+
+// Buzzer control variables
+bool buzzerActive = false;
+unsigned long buzzerStartTime = 0;
+
+void turnBuzzerOff() {
+    digitalWrite(BUZZER_PIN, LOW);
+    buzzerActive = false;
+}
+
+
+// ==========================================
+// HYBRID DEEP SLEEP RTC DATA & MODULAR LOGIC
+// ==========================================
+
+void initIndicators() {
+    pinMode(BUZZER_PIN, OUTPUT);
+    digitalWrite(BUZZER_PIN, LOW); // Ensure buzzer is OFF on boot to prevent stuck state
+    pinMode(COMM_LED_PIN, OUTPUT);
+    digitalWrite(COMM_LED_PIN, LOW);
+}
+
+void triggerAlarmIndicators() {
+    if (!buzzerActive) {
+        digitalWrite(BUZZER_PIN, HIGH);
+        buzzerStartTime = millis();
+        buzzerActive = true;
+        Serial.printf("BUZZER ON (Duration: %d seconds)\n", settings.buzzerDuration);
+    }
+    digitalWrite(COMM_LED_PIN, HIGH);
+}
+
+void readSensors(int &smokeVal, float &tempC) {
+    // --- ADC Diagnostic: 5 raw samples ---
+    int s0 = analogRead(SMOKE_SENSOR_PIN); delay(10);
+    int s1 = analogRead(SMOKE_SENSOR_PIN); delay(10);
+    int s2 = analogRead(SMOKE_SENSOR_PIN); delay(10);
+    int s3 = analogRead(SMOKE_SENSOR_PIN); delay(10);
+    int s4 = analogRead(SMOKE_SENSOR_PIN);
+    int rawAvg = (s0 + s1 + s2 + s3 + s4) / 5;
+    Serial.printf("[ADC Raw] %d %d %d %d %d | Avg: %d\n", s0, s1, s2, s3, s4, rawAvg);
+
+    smokeVal =CALIBRATION - rawAvg;
+    lastSmokeValue = smokeVal;
+
+    tempC = NAN;
+    if (dsSensor) {
+        // Request and read is blocking briefly; acceptable for periodic reporting
+        dsSensor->requestTemperatures();
+        float t = dsSensor->getTempCByIndex(0);
+        if (isValidTemperature(t)) {
+            tempC = t - TEMP_CALIB;
+            lastTemperature = tempC;
+        } else {
+            Serial.printf("Warning: DS18B20 invalid reading: %.2f C (treating as N/A)\n", t);
+            lastTemperature = NAN;
+        }
+    } else {
+        lastTemperature = NAN;
+    }
+}
+
+bool isAlarmCondition(int smokeVal, float tempC) {
+    // Direct comparison with UI threshold (inverted ADC value)
+    bool smokeDetected = (smokeVal >= settings.smokeThreshold);
+ 
+    // Delta/baseline kept for diagnostic logging only
+    int delta = abs(smokeVal - rtcData.baselineSmoke);
+    Serial.printf("BASE:%d CUR:%d DELTA:%d THRESH:%d RESULT:%s\n", rtcData.baselineSmoke, smokeVal, delta, settings.smokeThreshold, smokeDetected ? "SMOKE" : "NORMAL");
+ 
+    // Safe temperature check: only compare if temperature is valid (not NAN, not -127)
+    bool heatDetected = isValidTemperature(tempC) && (tempC >= settings.tempThreshold);
+    bool alarmTriggered = false;
+ 
+    switch (settings.alarmLevel) {
+        case 2:
+            // Level 2: Smoke only
+            alarmTriggered = smokeDetected;
+            break;
+        case 3:
+            // Level 3: Smoke AND Temperature
+            alarmTriggered = (smokeDetected && heatDetected);
+            break;
+        case 1:
+        default:
+            // Level 1: Smoke OR Temperature
+            alarmTriggered = (smokeDetected || heatDetected);
+            break;
+    }   
+ 
+    lastAlarmTriggered = alarmTriggered;
+ 
+    Serial.printf("[Level %d] Smoke: %d (threshold %d) -> %s | ", settings.alarmLevel, smokeVal, settings.smokeThreshold, smokeDetected ? "SMOKE" : "OK");
+    if (isValidTemperature(tempC)) {
+        Serial.printf("Temp: %.2f C (threshold %.1f) -> %s | ", tempC, settings.tempThreshold, heatDetected ? "HEAT" : "OK");
+    } else {
+        Serial.print("Temp: INVALID/N/A | ");
+    }
+    Serial.printf("Final Alarm State: %s\n", alarmTriggered ? "ALARM" : "SAFE");
+ 
+    return alarmTriggered;
+}
+ 
+
+Ticker minuteTicker;
+volatile bool minutePassed = false;
+
+void onMinutePassed() {
+  minutePassed = true;
+}
+
+
+void handleSmokeRequest(AsyncWebServerRequest *request) {
+  int s0 = analogRead(SMOKE_SENSOR_PIN); delay(10);
+  int s1 = analogRead(SMOKE_SENSOR_PIN); delay(10);
+  int s2 = analogRead(SMOKE_SENSOR_PIN);
+  int smokeValue =CALIBRATION - ((s0 + s1 + s2) / 3);
+  String tempStr = isnan(lastTemperature) ? String("N/A") : String(lastTemperature, 2);
+  String response = "Smoke Raw Avg: " + String(smokeValue) + " | Samples: " + s0 + "," + s1 + "," + s2 + " | Temp: " + tempStr + " C";
+  request->send(200, "text/plain", response);
+}
+
+void setup() {
+  // 1. Instantly turn OFF WiFi to save power during sleep-wake cycles
+  WiFi.mode(WIFI_OFF);
+  WiFi.forceSleepBegin();
+  delay(1);
+
+  Serial.begin(115200);
+  delay(10); // Allow UART hardware to settle after boot ROM 74880 baud
+  Serial.println();
+  Serial.println("\nBooting in Hybrid Deep Sleep Mode...");
+
+  pinMode(SMOKE_SENSOR_PIN, INPUT);
+  initIndicators();
+
+  // --- FIX: Mount LittleFS before attempting to read the config file ---
+  // Without this, loadConfiguration() can silently fail to read /config.json,
+  // settings falls back to defaults (empty SSID/password), and the device
+  // will always fail to connect and drop into AP mode.
+  if (!LittleFS.begin()) {
+      Serial.println("ERROR: LittleFS mount failed! Config cannot be loaded.");
+  } else {
+      Serial.println("LittleFS mounted successfully.");
+  }
+
+  loadConfiguration(CONFIG_FILE, settings);
+
+  // --- FIX: Diagnostic print to confirm credentials were actually loaded ---
+  Serial.printf("Loaded SSID: '%s' | Password length: %d\n", settings.wifiSSID, strlen(settings.wifiPassword));
+
+  // Initialize DS18B20 if configured
+  if (settings.ds18b20Pin >= 0) {
+      Serial.printf("Initializing DS18B20 on pin %d\n", settings.ds18b20Pin);
+      oneWire = new OneWire(settings.ds18b20Pin);
+      dsSensor = new DallasTemperature(oneWire);
+      dsSensor->begin();
+  } else {
+      Serial.println("DS18B20 disabled (ds18b20Pin < 0)");
+  }
+
+  // 2. Read RTC Memory to track Wake Cycles
+  ESP.rtcUserMemoryRead(0, (uint32_t*)&rtcData, sizeof(rtcData));
+  if (rtcData.magic != RTC_MAGIC) {
+      Serial.println("Cold boot detected. Initializing RTC Memory.");
+      rtcData.magic = RTC_MAGIC;
+      rtcData.wakeCount = 0;
+      isInitialBoot = true; // Set only on cold boot
+      
+      Serial.println("Taking 50 samples for baseline calibration...");
+      long baselineSum = 0;
+      for (int i = 0; i < 50; i++) {
+          baselineSum += analogRead(SMOKE_SENSOR_PIN);
+          delay(10);
+      }
+      rtcData.baselineSmoke = CALIBRATION - (baselineSum) / 50;
+      Serial.printf("Baseline calibration complete. baseline: %d\n", rtcData.baselineSmoke);
+  }
+  // 3. Read Sensors Immediately
+  int smokeValue = 0;
+  float temperatureC = NAN;
+  readSensors(smokeValue, temperatureC);
+
+  // Buffer reading in RTC
+  int currentIdx = rtcData.wakeCount;
+  if (currentIdx >= 15) currentIdx = 14; // Cap index to buffer size
+  rtcData.readings[currentIdx].smoke = smokeValue;
+  rtcData.readings[currentIdx].temperature = temperatureC;
+  rtcData.wakeCount++;
+
+  // Ensure minimum interval is 1 minute, options are 1, 5, 10, 15
+  int postFreq = settings.dataPostFrequency;
+  if (postFreq < 1) postFreq = 1;
+  else if (postFreq > 15) postFreq = 15;
+
+  Serial.printf("Wake Cycle: %d/%d\n", rtcData.wakeCount, postFreq);
+
+  // 4. Check for Alarms
+  bool alarmTriggered = isAlarmCondition(smokeValue, temperatureC);
+  bool timeToReport = (rtcData.wakeCount >= (uint32_t)postFreq);
+
+  // Seed the alarm-transition tracker so loop() can correctly detect the
+  // moment smoke clears, even if we booted directly into an alarm state.
+  wasAlarmActive = alarmTriggered;
+
+// ADDED
+  bootTime = millis();
+  awakeStartTime = millis(); // Initialize for all awake conditions
+  if (isInitialBoot) {
+      timeToReport = true; // Override cycle restriction for initial boot
+  }
+
+  // 5. Sleep if safe and not reporting time
+  if (!alarmTriggered && !timeToReport) {
+      // No alarm, and not yet time to phone home: go straight back to
+      // deep sleep for DEEP_SLEEP_SECONDS. This call does not return —
+      // the chip resets and setup() runs again on wake.
+      goToDeepSleep(DEEP_SLEEP_SECONDS);
+  }
+
+  // 6. If Alarm Triggered or Time to Report: Stay Awake and Connect!
+  if (alarmTriggered) {
+      Serial.println("ALARM DETECTED! Triggering buzzer and keeping system awake.");
+      triggerAlarmIndicators();
+  } else if (timeToReport) {
+      Serial.printf("Time for %d-minute periodic report. Waking up WiFi.\n", postFreq);
+  }
+
+  // Wake up WiFi to handle network connections
+  WiFi.forceSleepWake();
+  delay(50); // Increased delay to allow power to stabilize and prevent brownout
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(settings.wifiSSID, settings.wifiPassword);
+
+  Serial.print("Connecting to WiFi...");
+  unsigned long startTime = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startTime < 10000) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n=================================");
+    Serial.println("        Connected to WiFi!       ");
+    Serial.print("        IP: ");
+    Serial.println(WiFi.localIP());
+    Serial.println("=================================\n");
+    
+    // Immediately send POST with buffered data
+    if (sendSmokeData()) {
+        rtcData.wakeCount = 0; // Reset cycle counter ONLY on success
+        ESP.rtcUserMemoryWrite(0, (uint32_t*)&rtcData, sizeof(rtcData));
+    }
+    
+    // If it was just a routine report and not an alarm, keep awake for UI access
+    if (!alarmTriggered && timeToReport) {
+        Serial.println("Routine report successful. Keeping awake for 1 min for UI access.");
+        keepAwakeForUI = true;
+        awakeStartTime = millis();
+    } else if (!alarmTriggered && !timeToReport) {
+        // This handles cases where it woke up but wasn't time to report?
+        // Actually, if it wasn't time to report and no alarm, it wouldn't be here.
+    }
+
+    Serial.print("Device Name: ");
+    Serial.println(settings.deviceName);
+    Serial.print("Server URL: ");
+    Serial.println(settings.serverURL1);
+    Serial.println(settings.serverURL2);
+    Serial.print("Post Frequency (s): ");
+    Serial.println(settings.dataPostFrequency);
+    
+    configTime((5 * 60 * 60) + (30 * 60), 0, "pool.ntp.org", "time.nist.gov");
+    
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+        request->send(200, "text/html", processTemplate(STATUS_PAGE_HTML));
+    });
+    server.on("/config/device", HTTP_GET, [](AsyncWebServerRequest *request){
+        request->send(200, "text/html", processTemplate(DEVICE_CONFIG_PAGE_HTML));
+    });
+    server.on("/config/server", HTTP_GET, [](AsyncWebServerRequest *request){
+        request->send(200, "text/html", processTemplate(SERVER_CONFIG_PAGE_HTML));
+    });
+    server.on("/config/wifi", HTTP_GET, [](AsyncWebServerRequest *request){
+        request->send_P(200, "text/html", WIFI_MANAGER_HTML);
+    });
+    server.on("/system", HTTP_GET, [](AsyncWebServerRequest *request){
+        request->send(200, "text/html", processTemplate(SYSTEM_PAGE_HTML));
+    });
+
+    // Handle favicon request
+    server.on("/favicon.ico", HTTP_GET, [](AsyncWebServerRequest *request){
+        request->send(204);
+    });
+
+    server.on("/restart", HTTP_POST, [](AsyncWebServerRequest *request){
+        request->send(200, "text/plain", "Restarting...");
+        pendingRestart = true;
+        restartTime = millis() + 1000;
+    });
+    server.on("/factory_reset", HTTP_POST, [](AsyncWebServerRequest *request){
+        LittleFS.remove(CONFIG_FILE);
+        request->send(200, "text/plain", "Factory reset complete. Restarting...");
+        pendingRestart = true;
+        restartTime = millis() + 1000;
+    });
+
+    server.on("/smoke-status", HTTP_GET, handleSmokeRequest);
+
+  } else {
+    Serial.println("\nFailed to connect. Starting Access Point.");
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP("SmokeDetector-Setup", "eurthtech");
+    
+    Serial.print("AP IP address: ");
+    Serial.println(WiFi.softAPIP());
+
+    dnsServer.start(53, "*", WiFi.softAPIP());
+
+    // Captive portal. Catch all GET requests and serve the WiFi manager page.
+        server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+            request->send_P(200, "text/html", WIFI_MANAGER_HTML);
+        });
+    server.onNotFound([](AsyncWebServerRequest *request){
+      request->send_P(200, "text/html", WIFI_MANAGER_HTML);
+    });
+  }
+
+  // Ensure sensors are read even in AP mode
+  minuteTicker.attach(60, onMinutePassed);
+
+    server.on("/save", HTTP_POST, [](AsyncWebServerRequest *request){
+    bool shouldRestart = false;
+
+    if (request->hasParam("ssid", true)) {
+        strlcpy(settings.wifiSSID, request->getParam("ssid", true)->value().c_str(), sizeof(settings.wifiSSID));
+        shouldRestart = true;
+    }
+    if (request->hasParam("password", true)) {
+        strlcpy(settings.wifiPassword, request->getParam("password", true)->value().c_str(), sizeof(settings.wifiPassword));
+    }
+    if (request->hasParam("deviceName", true)) {
+        strlcpy(settings.deviceName, request->getParam("deviceName", true)->value().c_str(), sizeof(settings.deviceName));
+    }
+    if (request->hasParam("dataPostFrequency", true)) {
+        int freq = request->getParam("dataPostFrequency", true)->value().toInt();
+        if (freq == 1 || freq == 5 || freq == 10 || freq == 15) {
+            settings.dataPostFrequency = freq;
+        } else {
+            settings.dataPostFrequency = 15; // fallback
+        }
+    }
+    if (request->hasParam("smokeThreshold", true)) {
+        settings.smokeThreshold = request->getParam("smokeThreshold", true)->value().toInt();
+    }
+    if (request->hasParam("tempThreshold", true)) {
+        settings.tempThreshold = request->getParam("tempThreshold", true)->value().toFloat();
+    }
+    if (request->hasParam("ds18b20Pin", true)) {
+        // Changing pin requires restart to re-initialize OneWire/DallasTemperature
+        settings.ds18b20Pin = request->getParam("ds18b20Pin", true)->value().toInt();
+        shouldRestart = true;
+    }
+    if (request->hasParam("alarmLevel", true)) {
+        settings.alarmLevel = request->getParam("alarmLevel", true)->value().toInt();
+    }
+    if (request->hasParam("buzzerDuration", true)) {
+        settings.buzzerDuration = request->getParam("buzzerDuration", true)->value().toInt();
+    }
+    if (request->hasParam("serverURL1", true)) {
+        strlcpy(settings.serverURL1, request->getParam("serverURL1", true)->value().c_str(), sizeof(settings.serverURL1));
+    }
+    if (request->hasParam("authToken1", true)) {
+        strlcpy(settings.authToken1, request->getParam("authToken1", true)->value().c_str(), sizeof(settings.authToken1));
+    }
+    if (request->hasParam("serverURL2", true)) {
+        strlcpy(settings.serverURL2, request->getParam("serverURL2", true)->value().c_str(), sizeof(settings.serverURL2));
+    }
+    if (request->hasParam("authToken2", true)) {
+        strlcpy(settings.authToken2, request->getParam("authToken2", true)->value().c_str(), sizeof(settings.authToken2));
+    }
+    if (request->hasParam("deviceUUID", true)) {
+        strlcpy(settings.uuid, request->getParam("deviceUUID", true)->value().c_str(), sizeof(settings.uuid));
+    }
+    saveConfiguration(CONFIG_FILE, settings);
+
+    String response = "<html><body><h2>Settings saved!</h2>";
+    if (shouldRestart) {
+        response += "<p>WiFi settings changed. Device is restarting...</p>";
+    } else {
+        response += "<p><a href='/'>Return to Status Page</a></p>";
+    }
+    response += "</body></html>";
+    request->send(200, "text/html", response);
+
+    if (shouldRestart) {
+        pendingRestart = true;
+        restartTime = millis() + 2000;
+    }
+  });
+
+  server.begin();
+  Serial.println("HTTP server started.");
+}
+
+void loop() {
+  // In AP mode, process DNS requests for the captive portal
+  if (WiFi.getMode() == WIFI_AP) {
+    dnsServer.processNextRequest();
+  }
+
+  // COMM LED blink logic
+  // Make sure we are connected AND not in AP mode
+  if (WiFi.getMode() != WIFI_AP && WiFi.status() == WL_CONNECTED) {
+    // Make the COMM LED blink slowly (toggle every 2 seconds)
+    if (millis() - lastCommLedBlink >= 2000) {
+      lastCommLedBlink = millis();
+      commLedState = !commLedState;
+      // Do not overwrite the LED state if a data send is in progress 
+      // (sendSmokeData executes synchronously in the loop anyway)
+      digitalWrite(COMM_LED_PIN, commLedState ? HIGH : LOW);
+    }
+  } else {
+    // Keep LED OFF when not connected or in AP mode
+    digitalWrite(COMM_LED_PIN, LOW);
+    commLedState = false;
+  }
+
+  // Handle pending non-blocking restarts
+  if (pendingRestart && millis() > restartTime) {
+      ESP.restart();
+  }
+
+  // Non-blocking buzzer logic
+  if (buzzerActive) {
+      if (millis() - buzzerStartTime >= (unsigned long)settings.buzzerDuration * 1000UL) {
+          turnBuzzerOff();
+          Serial.println("BUZZER OFF (Duration Expired)");
+      }
+  }
+
+  // If a minute has passed while awake (e.g. during AP mode or alarm)
+  if (minutePassed) {
+    int s; float t;
+    readSensors(s, t);
+
+    int postFreq = settings.dataPostFrequency;
+    if (postFreq < 1) postFreq = 1;
+    else if (postFreq > 15) postFreq = 15;
+
+    // Buffer reading
+    int currentIdx = rtcData.wakeCount;
+    if (currentIdx >= 15) currentIdx = 14;
+    rtcData.readings[currentIdx].smoke = s;
+    rtcData.readings[currentIdx].temperature = t;
+    rtcData.wakeCount++;
+
+    bool alarmNow = isAlarmCondition(s, t);
+
+    if (alarmNow) {
+        // ---- Smoke present -> stay awake ----
+        triggerAlarmIndicators();
+        awakeStartTime = millis(); // reset timeout while alarm is active
+        wasAlarmActive = true;
+    } else {
+        if (buzzerActive) {
+            Serial.println("BUZZER OFF (Alarm Cleared)");
+        }
+        turnBuzzerOff();
+
+        if (wasAlarmActive) {
+            // ---- Smoke cleared -> attempt WiFi, send, then sleep either way ----
+            Serial.println("Alarm cleared. Attempting to report before sleeping.");
+            wasAlarmActive = false;
+
+            bool wifiOk = (WiFi.status() == WL_CONNECTED);
+            if (!wifiOk) {
+                Serial.println("WiFi not connected - attempting quick reconnect...");
+                WiFi.mode(WIFI_STA);
+                WiFi.begin(settings.wifiSSID, settings.wifiPassword);
+                unsigned long reconnectStart = millis();
+                while (WiFi.status() != WL_CONNECTED && millis() - reconnectStart < ALARM_CLEAR_WIFI_TIMEOUT_MS) {
+                    delay(200);
+                }
+                wifiOk = (WiFi.status() == WL_CONNECTED);
+            }
+
+            if (wifiOk) {
+                // ---- WiFi succeeds -> send data -> sleep ----
+                Serial.println("WiFi available - sending buffered data.");
+                if (sendSmokeData()) {
+                    rtcData.wakeCount = 0; // Reset cycle counter ONLY on success
+                    ESP.rtcUserMemoryWrite(0, (uint32_t*)&rtcData, sizeof(rtcData));
+                }
+            } else {
+                // ---- WiFi fails -> skip sending -> still sleep to save battery ----
+                Serial.println("WiFi unavailable - skipping send to save battery.");
+            }
+
+            // Sleep immediately regardless of send outcome. This call never
+            // returns; the chip resets and re-enters setup() on wake.
+            goToDeepSleep(DEEP_SLEEP_SECONDS);
+        }
+    }
+
+    if (rtcData.wakeCount >= (uint32_t)postFreq) {
+       dataSendDue = true;
+    }
+    minutePassed = false;
+  }
+
+  // If a data send is due, handle it in the main loop
+  if (dataSendDue) {
+    if (sendSmokeData()) {
+      rtcData.wakeCount = 0; // Reset ONLY on success
+      ESP.rtcUserMemoryWrite(0, (uint32_t*)&rtcData, sizeof(rtcData));
+    }
+    dataSendDue = false; // Reset the flag
+  }
+
+  // Handle deep sleep fallback for ALL awake states
+  unsigned long timeElapsed = millis() - awakeStartTime;
+  unsigned long timeoutDuration = isInitialBoot ? 180000 : (keepAwakeForUI ? 60000 : 300000); // 5 min fallback
+  
+  if (!lastAlarmTriggered && timeElapsed >= timeoutDuration) {
+      // Awake window (UI access / routine report / boot grace period) has
+      // ended and there's no active alarm — go back to sleep.
+      goToDeepSleep(DEEP_SLEEP_SECONDS);
+      // goToDeepSleep never returns, but keep these here for clarity/safety
+      // in case deep sleep is ever bypassed (e.g. flashing over USB).
+      awakeStartTime = millis();
+  }
+}

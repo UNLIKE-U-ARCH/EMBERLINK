@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"name": "python intro",
+			"path": "../python intro"
+		},
+		{
+			"name": "ESP32_HID5",
+			"path": "../../Documents/PlatformIO/Projects/ESP32_HID5"
+		}
+	],
+	"settings": {}
+}
