@@ -22,7 +22,10 @@ enum class EventType : uint8_t {
     TEST = 2,
     HEARTBEAT = 3,
     STATUS = 4,
-    SILENCE = 5
+    SILENCE = 5,
+    PRE_ALERT = 6,
+    PEER_CONFIRM = 7,
+    RELAY = 8
 };
 
 enum class AlarmLevel : uint8_t {
@@ -33,7 +36,7 @@ enum class AlarmLevel : uint8_t {
 
 struct SensorReading {
     int smoke = 0;
-    float temperature = NAN;
+    float temperature = 0.0f;
 };
 
 struct RTCBuffer {
@@ -55,9 +58,15 @@ struct MeshAlertPacket {
     EventType eventType = EventType::ALERT;
     AlarmLevel alarmLevel = AlarmLevel::LEVEL_1;
     int smokeValue = 0;
-    float temperatureC = NAN;
+    float temperatureC = 0.0f;
     int batteryMv = 0;
     uint8_t reserved[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    char originNodeId[16] = "";
+    char relayNodeId[16] = "";
+    uint8_t hopCount = 0;
+    uint8_t maxHops = 0;
+    uint8_t confirmationCount = 0;
+    uint8_t reserved2[3] = {0, 0, 0};
 };
 
 } // namespace emberlink

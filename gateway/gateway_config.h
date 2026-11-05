@@ -14,6 +14,12 @@ struct Config {
     char apPassword[32] = "emberlink123";
     bool modemEnabled = true;
     int uartBaud = 115200;
+
+    bool enablePeerMonitoring = false;
+    bool peerMonitoringEnabled = false; // legacy compatibility alias
+    uint32_t peerConfirmationWindowMs = 3000;
+    uint8_t maxPeerHops = 1;
+    uint8_t peerConfirmationThreshold = 1;
 };
 
 } // namespace gateway

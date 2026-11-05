@@ -83,12 +83,34 @@ inline bool isValidPacket(const MeshAlertPacket& packet) {
     if (packet.nodeId[0] == '\0') {
         return false;
     }
-    if (packet.eventType < EventType::ALERT || packet.eventType > EventType::SILENCE) {
+    if (packet.eventType < EventType::ALERT || packet.eventType > EventType::RELAY) {
         return false;
     }
     if (packet.alarmLevel < AlarmLevel::LEVEL_1 || packet.alarmLevel > AlarmLevel::LEVEL_3) {
         return false;
     }
+
+    if (packet.eventType == EventType::PRE_ALERT || packet.eventType == EventType::PEER_CONFIRM) {
+        if (packet.originNodeId[0] == '\0') {
+            return false;
+        }
+    }
+
+    if (packet.eventType == EventType::RELAY) {
+        if (packet.relayNodeId[0] == '\0') {
+            return false;
+        }
+        if (packet.hopCount > packet.maxHops) {
+            return false;
+        }
+    }
+
+    if (packet.eventType == EventType::PEER_CONFIRM) {
+        if (packet.confirmationCount == 0) {
+            return false;
+        }
+    }
+
     return true;
 }
 

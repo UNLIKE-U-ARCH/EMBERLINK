@@ -17,6 +17,9 @@
 namespace emberlink {
 namespace gateway {
 
+static Config gConfig;
+static bool dispatchEmergencyAlert(const MeshAlertPacket& packet);
+
 namespace {
 constexpr uint8_t kModemRxPin = 16;
 constexpr uint8_t kModemTxPin = 17;
@@ -34,12 +37,140 @@ struct GatewayRuntimeState {
     uint32_t lastAlertUtc = 0;
     uint32_t lastCommandUtc = 0;
     uint32_t lastDispatchFailureUtc = 0;
+    uint32_t lastAlertSequence = 0;
     String lastAlertNodeId = "";
     ModemState modemState = ModemState::BOOT;
     bool modemReady = false;
 };
 
+struct PeerEventRecord {
+    char originNodeId[16] = "";
+    uint32_t sequence = 0;
+    uint32_t firstSeenUtc = 0;
+    uint8_t confirmations = 0;
+    char confirmingPeers[4][16] = {"", "", "", ""};
+    bool resolved = false;
+};
+
 constexpr uint32_t kDispatchCooldownSec = 60;
+constexpr size_t kPeerEventCapacity = 8;
+static PeerEventRecord gPeerEvents[kPeerEventCapacity] = {};
+
+static const char* getOriginNodeId(const MeshAlertPacket& packet) {
+    if (packet.originNodeId[0] != '\0') {
+        return packet.originNodeId;
+    }
+    return packet.nodeId;
+}
+
+static bool hasPeerConfirmed(const PeerEventRecord& record, const char* peerNodeId) {
+    if (peerNodeId == nullptr || peerNodeId[0] == '\0') {
+        return false;
+    }
+
+    for (uint8_t i = 0; i < 4; ++i) {
+        if (record.confirmingPeers[i][0] != '\0' &&
+            strcmp(record.confirmingPeers[i], peerNodeId) == 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static PeerEventRecord* findOrCreatePeerEventRecord(const MeshAlertPacket& packet) {
+    const char* originNodeId = getOriginNodeId(packet);
+    if (originNodeId == nullptr || originNodeId[0] == '\0') {
+        return nullptr;
+    }
+
+    for (size_t i = 0; i < kPeerEventCapacity; ++i) {
+        if (gPeerEvents[i].originNodeId[0] != '\0' &&
+            strcmp(gPeerEvents[i].originNodeId, originNodeId) == 0 &&
+            gPeerEvents[i].sequence == packet.sequence) {
+            return &gPeerEvents[i];
+        }
+    }
+
+    for (size_t i = 0; i < kPeerEventCapacity; ++i) {
+        if (gPeerEvents[i].originNodeId[0] == '\0') {
+            strncpy(gPeerEvents[i].originNodeId, originNodeId, sizeof(gPeerEvents[i].originNodeId) - 1);
+            gPeerEvents[i].sequence = packet.sequence;
+            gPeerEvents[i].firstSeenUtc = packet.timestampUtc;
+            gPeerEvents[i].confirmations = 0;
+            for (uint8_t j = 0; j < 4; ++j) {
+                gPeerEvents[i].confirmingPeers[j][0] = '\0';
+            }
+            gPeerEvents[i].resolved = false;
+            return &gPeerEvents[i];
+        }
+    }
+
+    return nullptr;
+}
+
+static void handlePeerConsensusPacket(const MeshAlertPacket& packet) {
+    if (packet.eventType == EventType::PRE_ALERT) {
+        PeerEventRecord* record = findOrCreatePeerEventRecord(packet);
+        if (record != nullptr) {
+            Serial.printf("PMC pre-alert recorded for node=%s sequence=%u\n",
+                          record->originNodeId,
+                          record->sequence);
+        }
+        return;
+    }
+
+    if (packet.eventType == EventType::PEER_CONFIRM) {
+        PeerEventRecord* record = findOrCreatePeerEventRecord(packet);
+        if (record == nullptr || record->resolved) {
+            return;
+        }
+
+        if (packet.nodeId[0] == '\0' || strcmp(packet.nodeId, record->originNodeId) == 0) {
+            return;
+        }
+
+        const uint32_t ageSec = packet.timestampUtc - record->firstSeenUtc;
+        if (ageSec > (gConfig.peerConfirmationWindowMs / 1000UL)) {
+            Serial.printf("PMC confirmation expired for %s\n", record->originNodeId);
+            return;
+        }
+
+        if (hasPeerConfirmed(*record, packet.nodeId)) {
+            return;
+        }
+
+        for (uint8_t i = 0; i < 4; ++i) {
+            if (record->confirmingPeers[i][0] == '\0') {
+                strncpy(record->confirmingPeers[i], packet.nodeId, sizeof(record->confirmingPeers[i]) - 1);
+                break;
+            }
+        }
+
+        record->confirmations = 0;
+        for (uint8_t i = 0; i < 4; ++i) {
+            if (record->confirmingPeers[i][0] != '\0') {
+                record->confirmations += 1;
+            }
+        }
+
+        Serial.printf("PMC peer confirmation for %s count=%u threshold=%u\n",
+                      record->originNodeId,
+                      record->confirmations,
+                      gConfig.peerConfirmationThreshold);
+
+        if (record->confirmations >= gConfig.peerConfirmationThreshold) {
+            record->resolved = true;
+            MeshAlertPacket promoted = packet;
+            strncpy(promoted.nodeId, record->originNodeId, sizeof(promoted.nodeId) - 1);
+            strncpy(promoted.originNodeId, record->originNodeId, sizeof(promoted.originNodeId) - 1);
+            promoted.eventType = EventType::ALERT;
+            promoted.confirmationCount = record->confirmations;
+            Serial.printf("PMC consensus reached for %s; dispatching stronger alert\n", record->originNodeId);
+            dispatchEmergencyAlert(promoted);
+        }
+    }
+}
 
 String normalizeCommandText(const String& raw) {
     String normalized = raw;
@@ -98,7 +229,6 @@ String extractMessageBodyFromModemLine(const String& text) {
 }
 }
 
-static Config gConfig;
 static GatewayRuntimeState gGatewayState;
 
 String resolveAlertNumber() {
@@ -116,13 +246,16 @@ bool shouldSuppressDuplicateAlert(const MeshAlertPacket& packet, uint32_t nowSec
         return false;
     }
 
-    const String currentNode = String(packet.nodeId);
+    const String currentNode = String(packet.originNodeId[0] != '\0' ? packet.originNodeId : packet.nodeId);
     if (currentNode.length() == 0) {
         return false;
     }
 
-    return gGatewayState.lastAlertNodeId == currentNode &&
-           nowSec - gGatewayState.lastAlertUtc < kDispatchCooldownSec;
+    const bool sameOrigin = gGatewayState.lastAlertNodeId == currentNode;
+    const bool sameSequence = packet.sequence != 0 && packet.sequence == gGatewayState.lastAlertSequence;
+    const bool withinWindow = nowSec - gGatewayState.lastAlertUtc < kDispatchCooldownSec;
+
+    return sameOrigin && (sameSequence || withinWindow);
 }
 
 class ModemController {
@@ -397,7 +530,8 @@ static bool dispatchEmergencyAlert(const MeshAlertPacket& packet) {
     }
 
     gGatewayState.lastAlertUtc = nowSec;
-    gGatewayState.lastAlertNodeId = String(packet.nodeId);
+    gGatewayState.lastAlertNodeId = String(packet.originNodeId[0] != '\0' ? packet.originNodeId : packet.nodeId);
+    gGatewayState.lastAlertSequence = packet.sequence;
 
     if (alertDestination.length() == 0) {
         Serial.println("No valid dispatch destination configured; alert was logged but not dispatched");
@@ -441,6 +575,12 @@ static void onEspNowReceive(const uint8_t* mac, const uint8_t* incomingData, int
                   packet.temperatureC,
                   static_cast<int>(packet.alarmLevel),
                   static_cast<int>(packet.eventType));
+
+    if ((gConfig.enablePeerMonitoring || gConfig.peerMonitoringEnabled) &&
+        (packet.eventType == EventType::PRE_ALERT || packet.eventType == EventType::PEER_CONFIRM)) {
+        handlePeerConsensusPacket(packet);
+        return;
+    }
 
     dispatchEmergencyAlert(packet);
 }
